@@ -269,7 +269,7 @@ function parseVCardLine(line) {
   if (colonIdx < 0) return null;
 
   const left = line.substring(0, colonIdx);
-  let value = line.substring(colonIdx + 1);
+  const rawValue = line.substring(colonIdx + 1);
 
   // Property+params; split by ;
   const segments = left.split(';');
@@ -289,12 +289,31 @@ function parseVCardLine(line) {
     }
   }
 
-  // Handle ENCODING=QUOTED-PRINTABLE (vCard 2.1, common on Android exports)
-  if ((params['ENCODING'] || '').toUpperCase().includes('QUOTED-PRINTABLE')) {
-    value = decodeQuotedPrintable(value, params['CHARSET']);
+  const isQP = (params['ENCODING'] || '').toUpperCase().includes('QUOTED-PRINTABLE');
+  const charset = params['CHARSET'];
+
+  // IMPORTANT: For QUOTED-PRINTABLE we must NOT decode the whole value yet.
+  // Shift_JIS second bytes can collide with structural ';' separators, so
+  // structured fields (N, ADR, ORG) are split on raw ';' first, then each
+  // sub-field is decoded individually. `value` is a simple (already-decoded)
+  // value for non-structured single-value fields.
+  let value;
+  if (isQP) {
+    value = decodeQuotedPrintable(rawValue, charset);
+  } else {
+    value = rawValue;
   }
 
-  return { name, params, value };
+  return { name, params, value, rawValue, isQP, charset };
+}
+
+// Split a raw structured value on ';' then decode each part.
+// Handles the Shift_JIS-vs-semicolon collision correctly.
+function splitStructured(p) {
+  if (p.isQP) {
+    return p.rawValue.split(';').map(part => unescapeValue(decodeQuotedPrintable(part, p.charset)));
+  }
+  return p.value.split(';').map(part => unescapeValue(part));
 }
 
 function getTypes(params) {
@@ -362,7 +381,8 @@ function parseVCards(text) {
         break;
       case 'N': {
         // family;given;additional;prefix;suffix
-        const parts = value.split(';');
+        // Split on raw ';' BEFORE decoding to avoid Shift_JIS byte collisions
+        const parts = splitStructured(p);
         current.family = parts[0] || '';
         current.given = parts[1] || '';
         break;
@@ -383,15 +403,18 @@ function parseVCards(text) {
         // SOUND;X-IRMC-N:familyフリ;givenフリ
         const types = getTypes(p.params);
         if (types.includes('X-IRMC-N') || types.includes('PHONETIC')) {
-          const parts = value.split(';');
+          const parts = splitStructured(p);
           if (!current.familyPhonetic) current.familyPhonetic = parts[0] || '';
           if (!current.givenPhonetic) current.givenPhonetic = parts[1] || '';
         }
         break;
       }
-      case 'ORG':
-        current.org = value.split(';')[0] || '';
+      case 'ORG': {
+        const parts = splitStructured(p);
+        // ORG can be "会社名;部署名" — join with space, drop empties
+        current.org = parts.filter(Boolean).join(' ').trim();
         break;
+      }
       case 'TITLE':
         current.title = value;
         break;
@@ -406,15 +429,23 @@ function parseVCards(text) {
         }
         break;
       case 'ADR': {
-        // po;ext;street;city;region;postal;country
-        const parts = value.split(';');
-        const street = parts[2] || '';
-        const city = parts[3] || '';
-        const region = parts[4] || '';
-        const postal = parts[5] || '';
-        const country = parts[6] || '';
-        const formatted = [postal ? '〒' + postal : '', country, region, city, street]
-          .filter(Boolean).join(' ').trim();
+        // Standard order: po-box;extended;street;city;region;postal;country
+        // BUT many Android/Google exports scatter the address across these
+        // fields in a broken order. To avoid losing any information, join ALL
+        // non-empty fields with a space rather than assuming positions.
+        const parts = splitStructured(p);
+        const pieces = [];
+        for (let raw of parts) {
+          const piece = (raw || '').trim();
+          if (!piece) continue;
+          // Prefix postal codes (NNN-NNNN or NNNNNNN) with 〒
+          if (/^\d{3}-?\d{4}$/.test(piece)) {
+            pieces.push('〒' + piece);
+          } else {
+            pieces.push(piece);
+          }
+        }
+        const formatted = pieces.join(' ').trim();
         if (formatted) {
           current.addresses.push({ type: mapAddrType(getTypes(p.params)), value: formatted });
         }
