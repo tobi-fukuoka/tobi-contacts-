@@ -99,6 +99,17 @@
     display: flex;
     gap: 6px;
   }
+  .actions-group {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .selection-count {
+    font-size: 13px;
+    color: #6c6c70;
+    padding: 0 8px;
+    white-space: nowrap;
+  }
   .btn {
     padding: 9px 14px;
     border-radius: 10px;
@@ -207,10 +218,39 @@
     border-bottom: 1px solid #f0f0f3;
     cursor: pointer;
     transition: background .1s;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
   }
   .contact-item:active { background: #f2f2f7; }
   .contact-item.selected {
     background: #e8eef5;
+  }
+  .contact-item.checked {
+    background: #eef4fb;
+  }
+  .contact-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .contact-checkbox {
+    width: 22px;
+    height: 22px;
+    border: 2px solid #c7c7cc;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 600;
+    flex-shrink: 0;
+    font-size: 13px;
+    margin-top: 2px;
+    transition: background .1s, border-color .1s;
+  }
+  .contact-item.checked .contact-checkbox {
+    background: #1f3a5f;
+    border-color: #1f3a5f;
   }
   .contact-name {
     font-size: 16px;
@@ -512,9 +552,18 @@
       <button class="search-clear" id="search-clear" aria-label="クリア">×</button>
     </div>
     <div class="header-actions">
-      <button class="btn" id="btn-import">取込</button>
-      <button class="btn" id="btn-export">書出</button>
-      <button class="btn btn-primary" id="btn-new">新規</button>
+      <div class="actions-group" id="actions-normal">
+        <button class="btn" id="btn-select">選択</button>
+        <button class="btn" id="btn-import">取込</button>
+        <button class="btn" id="btn-export">書出</button>
+        <button class="btn btn-primary" id="btn-new">新規</button>
+      </div>
+      <div class="actions-group" id="actions-selection" style="display:none">
+        <button class="btn btn-ghost" id="btn-select-cancel">キャンセル</button>
+        <span class="selection-count" id="selection-count">0件選択中</span>
+        <button class="btn" id="btn-select-all">全選択</button>
+        <button class="btn btn-danger" id="btn-delete-selected">削除</button>
+      </div>
     </div>
   </header>
 

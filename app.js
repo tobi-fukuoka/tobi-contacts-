@@ -36,6 +36,8 @@ const state = {
   filteredGroups: [],   // [{ label, items: [contact] }]
   selectedId: null,
   searchQuery: '',
+  selectionMode: false,
+  selectedIds: new Set(),
 };
 
 // ---------- IndexedDB ----------
@@ -192,13 +194,24 @@ function getSortKey(c) {
 // ---------- vCard parsing ----------
 function unfoldLines(text) {
   // RFC 6350: lines starting with space or tab are continuations of previous
+  // vCard 2.1 (Android): lines ending with '=' inside QUOTED-PRINTABLE continue on next line
   const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
   const out = [];
+  let pendingQP = false;
+
   for (const line of lines) {
     if ((line.startsWith(' ') || line.startsWith('\t')) && out.length > 0) {
       out[out.length - 1] += line.substring(1);
+    } else if (pendingQP && out.length > 0) {
+      // QP soft line break: strip trailing '=' and concatenate
+      out[out.length - 1] = out[out.length - 1].slice(0, -1) + line;
     } else {
       out.push(line);
+    }
+    // Re-evaluate whether the (possibly merged) last line is awaiting QP continuation
+    if (out.length > 0) {
+      const last = out[out.length - 1];
+      pendingQP = /ENCODING=QUOTED-PRINTABLE/i.test(last) && last.endsWith('=');
     }
   }
   return out;
@@ -213,8 +226,19 @@ function unescapeValue(s) {
     .replace(/\\\\/g, '\\');
 }
 
-function decodeQuotedPrintable(s) {
-  // Decode =XX hex sequences as UTF-8 bytes
+function normalizeCharset(cs) {
+  if (!cs) return 'utf-8';
+  const k = cs.toLowerCase().replace(/[_\s]/g, '-');
+  if (k === 'shift-jis' || k === 'sjis' || k === 'ms-kanji' ||
+      k === 'windows-31j' || k === 'cp932' || k === 'x-sjis') return 'shift_jis';
+  if (k === 'euc-jp' || k === 'eucjp') return 'euc-jp';
+  if (k === 'iso-2022-jp' || k === 'jis') return 'iso-2022-jp';
+  if (k === 'utf-8' || k === 'utf8') return 'utf-8';
+  return k;
+}
+
+function decodeQuotedPrintable(s, charset) {
+  // Decode =XX hex sequences using the specified charset (default UTF-8)
   try {
     const bytes = [];
     for (let i = 0; i < s.length; i++) {
@@ -226,9 +250,14 @@ function decodeQuotedPrintable(s) {
           continue;
         }
       }
-      bytes.push(s.charCodeAt(i));
+      bytes.push(s.charCodeAt(i) & 0xFF);
     }
-    return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+    const enc = normalizeCharset(charset);
+    try {
+      return new TextDecoder(enc).decode(new Uint8Array(bytes));
+    } catch (e) {
+      return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+    }
   } catch (e) {
     return s;
   }
@@ -260,9 +289,9 @@ function parseVCardLine(line) {
     }
   }
 
-  // Handle ENCODING=QUOTED-PRINTABLE
+  // Handle ENCODING=QUOTED-PRINTABLE (vCard 2.1, common on Android exports)
   if ((params['ENCODING'] || '').toUpperCase().includes('QUOTED-PRINTABLE')) {
-    value = decodeQuotedPrintable(value);
+    value = decodeQuotedPrintable(value, params['CHARSET']);
   }
 
   return { name, params, value };
@@ -609,11 +638,18 @@ function renderList() {
       const name = displayName(c);
       const furigana = fullFurigana(c);
       const subline = buildContactSubline(c, q);
+      const isChecked = state.selectedIds.has(c.id);
+      const checkbox = state.selectionMode
+        ? `<div class="contact-checkbox">${isChecked ? '✓' : ''}</div>`
+        : '';
       return `
-        <div class="contact-item ${isSelected ? 'selected' : ''}" data-id="${c.id}">
-          <p class="contact-name">${highlightText(name, q)}</p>
-          ${furigana ? `<p class="contact-furigana">${highlightText(furigana, q)}</p>` : ''}
-          ${subline ? `<p class="contact-subline">${subline}</p>` : ''}
+        <div class="contact-item ${isSelected ? 'selected' : ''} ${isChecked ? 'checked' : ''}" data-id="${c.id}">
+          ${checkbox}
+          <div class="contact-content">
+            <p class="contact-name">${highlightText(name, q)}</p>
+            ${furigana ? `<p class="contact-furigana">${highlightText(furigana, q)}</p>` : ''}
+            ${subline ? `<p class="contact-subline">${subline}</p>` : ''}
+          </div>
         </div>
       `;
     }).join('');
@@ -630,6 +666,22 @@ function renderList() {
 
 function renderDetail() {
   const pane = document.getElementById('detail-pane');
+
+  if (state.selectionMode) {
+    const n = state.selectedIds.size;
+    pane.innerHTML = `
+      <div class="detail-empty">
+        <svg class="detail-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="m9 11 3 3 8-8"/>
+          <path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>
+        </svg>
+        <p style="font-size:18px; color:#1c1c1e; margin:0 0 8px;">${n}件 選択中</p>
+        <p style="font-size:13px; color:#8e8e93;">削除する連絡先にチェックを入れてから<br>右上の「削除」をタップしてください</p>
+      </div>
+    `;
+    return;
+  }
+
   const c = state.contacts.find(x => x.id === state.selectedId);
   if (!c) {
     pane.innerHTML = `
@@ -749,7 +801,96 @@ function render() {
   renderGyoRail();
   renderList();
   renderDetail();
+  updateHeaderUI();
   document.getElementById('search-clear').classList.toggle('show', !!state.searchQuery);
+}
+
+function updateHeaderUI() {
+  const normal = document.getElementById('actions-normal');
+  const sel = document.getElementById('actions-selection');
+  if (!normal || !sel) return;
+  normal.style.display = state.selectionMode ? 'none' : 'flex';
+  sel.style.display = state.selectionMode ? 'flex' : 'none';
+  if (state.selectionMode) {
+    const count = state.selectedIds.size;
+    document.getElementById('selection-count').textContent = `${count}件選択中`;
+    const visibleIds = new Set();
+    state.filteredGroups.forEach(g => g.items.forEach(c => visibleIds.add(c.id)));
+    const allBtn = document.getElementById('btn-select-all');
+    allBtn.textContent = (count >= visibleIds.size && visibleIds.size > 0) ? '全解除' : '全選択';
+    const delBtn = document.getElementById('btn-delete-selected');
+    delBtn.disabled = count === 0;
+    delBtn.style.opacity = count === 0 ? '0.4' : '1';
+  }
+}
+
+// ---------- Selection mode ----------
+function enterSelectionMode() {
+  if (state.contacts.length === 0) {
+    showToast('連絡先がありません');
+    return;
+  }
+  state.selectionMode = true;
+  state.selectedIds = new Set();
+  render();
+}
+
+function exitSelectionMode() {
+  state.selectionMode = false;
+  state.selectedIds = new Set();
+  render();
+}
+
+function toggleSelectionId(id) {
+  if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+  else state.selectedIds.add(id);
+  render();
+}
+
+function toggleSelectAllVisible() {
+  const visibleIds = [];
+  state.filteredGroups.forEach(g => g.items.forEach(c => visibleIds.push(c.id)));
+  const allSelected = visibleIds.every(id => state.selectedIds.has(id));
+  if (allSelected) {
+    visibleIds.forEach(id => state.selectedIds.delete(id));
+  } else {
+    visibleIds.forEach(id => state.selectedIds.add(id));
+  }
+  render();
+}
+
+async function deleteSelected() {
+  const count = state.selectedIds.size;
+  if (count === 0) return;
+  const confirmed = await showConfirm(
+    `${count}件を削除`,
+    `選択した${count}件の連絡先を削除します。\nこの操作は元に戻せません。`
+  );
+  if (!confirmed) return;
+
+  const ids = Array.from(state.selectedIds);
+  try {
+    const db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      ids.forEach(id => store.delete(id));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    showToast('削除に失敗しました');
+    return;
+  }
+
+  state.contacts = state.contacts.filter(c => !state.selectedIds.has(c.id));
+  if (state.selectedId && state.selectedIds.has(state.selectedId)) {
+    state.selectedId = null;
+  }
+  state.selectedIds = new Set();
+  state.selectionMode = false;
+  render();
+  showToast(`${count}件を削除しました`);
 }
 
 // ---------- Edit form ----------
@@ -909,14 +1050,31 @@ async function deleteCurrent() {
 }
 
 // ---------- Import ----------
-async function readFileAs(file, encoding) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    if (encoding) reader.readAsText(file, encoding);
-    else reader.readAsText(file);
-  });
+async function readVCardFile(file) {
+  // Read as bytes, then detect encoding. This handles UTF-8 (with/without BOM)
+  // and Shift_JIS (CP932) — common on Android contact exports.
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  // UTF-8 BOM
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    return { text: new TextDecoder('utf-8').decode(bytes.subarray(3)), encoding: 'utf-8' };
+  }
+
+  // Strict UTF-8: throws if any invalid byte sequence
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return { text, encoding: 'utf-8' };
+  } catch (e) {
+    // Not valid UTF-8 — try Shift_JIS / CP932 (Android, older phones)
+    try {
+      const text = new TextDecoder('shift_jis').decode(bytes);
+      return { text, encoding: 'shift_jis' };
+    } catch (e2) {
+      // Last resort: UTF-8 with replacement characters
+      return { text: new TextDecoder('utf-8').decode(bytes), encoding: 'utf-8?' };
+    }
+  }
 }
 
 function isDuplicate(newCard, existing) {
@@ -951,13 +1109,11 @@ async function importFiles(files) {
   const logs = [];
 
   for (const file of files) {
-    let text;
+    let text, encoding;
     try {
-      text = await readFileAs(file);
-      // If contains many � replacement chars, retry as Shift_JIS
-      if ((text.match(/\uFFFD/g) || []).length > 5) {
-        try { text = await readFileAs(file, 'shift_jis'); } catch (e) {}
-      }
+      const result = await readVCardFile(file);
+      text = result.text;
+      encoding = result.encoding;
     } catch (e) {
       parseError++;
       logs.push(`✗ ${file.name}: 読み取りエラー`);
@@ -973,7 +1129,7 @@ async function importFiles(files) {
       continue;
     }
 
-    logs.push(`― ${file.name}: ${cards.length}件 検出`);
+    logs.push(`― ${file.name} [${encoding}]: ${cards.length}件 検出`);
 
     const toAdd = [];
     for (const card of cards) {
@@ -1094,9 +1250,19 @@ function setupEvents() {
       }
       return;
     }
-    state.selectedId = item.dataset.id;
-    render();
+    if (state.selectionMode) {
+      toggleSelectionId(item.dataset.id);
+    } else {
+      state.selectedId = item.dataset.id;
+      render();
+    }
   });
+
+  // Selection mode buttons
+  document.getElementById('btn-select').addEventListener('click', enterSelectionMode);
+  document.getElementById('btn-select-cancel').addEventListener('click', exitSelectionMode);
+  document.getElementById('btn-select-all').addEventListener('click', toggleSelectAllVisible);
+  document.getElementById('btn-delete-selected').addEventListener('click', deleteSelected);
 
   // Header buttons
   document.getElementById('btn-new').addEventListener('click', () => openEdit(null));
