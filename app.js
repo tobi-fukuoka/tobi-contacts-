@@ -1006,7 +1006,7 @@ function openEdit(contact) {
   document.getElementById('edit-modal').classList.add('show');
 }
 
-function readEditForm() {
+function readEditForm(keepEmpty) {
   const d = editState.draft;
   d.family = document.getElementById('f-family').value.trim();
   d.given = document.getElementById('f-given').value.trim();
@@ -1024,7 +1024,9 @@ function readEditForm() {
     rows.forEach(row => {
       const type = row.querySelector('[data-field="type"]').value;
       const value = row.querySelector('[data-field="value"]').value.trim();
-      if (value) items.push({ type, value });
+      // While editing keep empty rows so newly-added inputs don't vanish.
+      // On final save (keepEmpty=false) drop the empty ones.
+      if (value || keepEmpty) items.push({ type, value });
     });
     d[kind] = items;
   });
@@ -1033,7 +1035,7 @@ function readEditForm() {
   const urls = [];
   urlRows.forEach(row => {
     const value = row.querySelector('[data-field="value"]').value.trim();
-    if (value) urls.push(value);
+    if (value || keepEmpty) urls.push(value);
   });
   d.urls = urls;
 
@@ -1320,6 +1322,9 @@ function setupEvents() {
   document.querySelectorAll('.multi-add').forEach(btn => {
     btn.addEventListener('click', () => {
       const kind = btn.dataset.add;
+      // First capture whatever is currently typed in the form, THEN append the
+      // new empty row, otherwise the read-back would overwrite the new item.
+      readEditForm(true);
       if (!editState.draft[kind]) editState.draft[kind] = [];
       if (kind === 'urls') {
         editState.draft.urls.push('');
@@ -1330,7 +1335,6 @@ function setupEvents() {
       } else if (kind === 'addresses') {
         editState.draft.addresses.push({ type: '自宅', value: '' });
       }
-      readEditForm();
       renderMultiList(kind);
     });
   });
@@ -1339,7 +1343,7 @@ function setupEvents() {
   ['tels', 'emails', 'addresses', 'urls'].forEach(kind => {
     document.getElementById('f-' + kind).addEventListener('click', (e) => {
       if (e.target.matches('[data-remove]')) {
-        readEditForm();
+        readEditForm(true);
         const row = e.target.closest('.multi-row');
         const idx = parseInt(row.dataset.idx, 10);
         editState.draft[kind].splice(idx, 1);
