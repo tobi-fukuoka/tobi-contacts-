@@ -1213,7 +1213,7 @@ function exportAllAsVCard() {
   const now = new Date();
   const ts = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}`;
   a.href = url;
-  a.download = `tobi-contacts-${ts}.vcf`;
+  a.download = `連絡先_${ts}.vcf`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
