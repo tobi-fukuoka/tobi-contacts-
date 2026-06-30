@@ -3,7 +3,7 @@
 // バージョンを上げると古いキャッシュを破棄して再キャッシュ
 // ============================================================
 
-const CACHE_VERSION = 'tobi-contacts-v6';
+const CACHE_VERSION = 'tobi-contacts-v7';
 const CACHE_FILES = [
   './',
   './index.html',

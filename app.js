@@ -68,10 +68,18 @@ async function dbGetAll() {
 async function dbPut(contact) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(contact);
+    let tx;
+    try {
+      tx = db.transaction(STORE, 'readwrite');
+      const req = tx.objectStore(STORE).put(contact);
+      req.onerror = () => reject(req.error || tx.error);
+    } catch (e) {
+      reject(e);
+      return;
+    }
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('transaction aborted'));
   });
 }
 
@@ -978,7 +986,9 @@ function renderMultiList(kind) {
 function openEdit(contact) {
   if (contact) {
     editState.editingId = contact.id;
-    editState.draft = JSON.parse(JSON.stringify(contact));
+    // Use sanitizeContact for a safe deep copy (avoids JSON edge cases and
+    // strips any non-cloneable stray props that could break saving later).
+    editState.draft = sanitizeContact(contact);
     document.getElementById('edit-title').textContent = '連絡先を編集';
     document.getElementById('edit-delete').style.display = '';
   } else {
@@ -1051,18 +1061,56 @@ async function saveEdit() {
     showToast('名前か会社、電話番号、メールのいずれかを入力してください');
     return;
   }
-  d._searchIndex = buildSearchIndex(d);
-  await dbPut(d);
+
+  // Build a clean, structured-clone-safe object. Imported data can carry
+  // stray properties/values that IndexedDB refuses to store, which would
+  // make put() throw and silently abort the save (button "does nothing").
+  const clean = sanitizeContact(d);
+  clean._searchIndex = buildSearchIndex(clean);
+
+  try {
+    await dbPut(clean);
+  } catch (e) {
+    console.error('保存に失敗:', e);
+    showToast('保存に失敗しました（' + (e && e.name ? e.name : 'エラー') + '）');
+    return;
+  }
 
   // Update local state
-  const idx = state.contacts.findIndex(c => c.id === d.id);
-  if (idx >= 0) state.contacts[idx] = d;
-  else state.contacts.push(d);
-  state.selectedId = d.id;
+  const idx = state.contacts.findIndex(c => c.id === clean.id);
+  if (idx >= 0) state.contacts[idx] = clean;
+  else state.contacts.push(clean);
+  state.selectedId = clean.id;
+  editState.draft = clean;
 
   closeEdit();
   render();
   showToast(editState.editingId ? '保存しました' : '追加しました');
+}
+
+// Produce a plain object containing only serializable, expected fields.
+// This guarantees IndexedDB can store it (avoids DataCloneError).
+function sanitizeContact(d) {
+  const str = (v) => (v == null ? '' : String(v));
+  return {
+    id: str(d.id) || uuid(),
+    fn: str(d.fn),
+    family: str(d.family),
+    given: str(d.given),
+    familyPhonetic: str(d.familyPhonetic),
+    givenPhonetic: str(d.givenPhonetic),
+    org: str(d.org),
+    orgPhonetic: str(d.orgPhonetic),
+    title: str(d.title),
+    tels: (d.tels || []).map(t => ({ type: str(t.type), value: str(t.value) })),
+    emails: (d.emails || []).map(e => ({ type: str(e.type), value: str(e.value) })),
+    addresses: (d.addresses || []).map(a => ({ type: str(a.type), value: str(a.value) })),
+    urls: (d.urls || []).map(u => str(u)),
+    note: str(d.note),
+    birthday: str(d.birthday),
+    createdAt: typeof d.createdAt === 'number' ? d.createdAt : Date.now(),
+    updatedAt: Date.now(),
+  };
 }
 
 function closeEdit() {
